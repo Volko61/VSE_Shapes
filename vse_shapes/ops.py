@@ -4,6 +4,7 @@ import json
 import math
 import os
 import tempfile
+import time
 import uuid
 
 import bpy
@@ -131,19 +132,74 @@ def needs_relocate(scene):
 _SHAPE_LABELS = {'RECT': "Rectangle", 'ELLIPSE': "Ellipse", 'FREEHAND': "Stroke"}
 
 
-def _free_channel(se, frame_start, frame_end):
-    busy = set()
-    for strip in props.top_level_strips(se):
-        if strip.frame_final_start < frame_end and strip.frame_final_end > frame_start:
-            busy.add(strip.channel)
-    channel = 1
-    while channel in busy:
-        channel += 1
+# Channel captured by VSE_SHAPES_OT_add_menu at the moment Shift+A was
+# pressed over the timeline, consumed by the next Add operation. A menu
+# popup moves the mouse away from the timeline before the leaf "Add
+# Rectangle/Ellipse" operator actually runs, so that operator's own event
+# can no longer see the timeline; this bridges the gap. Expires quickly so
+# a cancelled (Esc'd) menu can't leak a stale channel into an unrelated
+# later Add.
+_PENDING_CHANNEL_TTL = 15.0
+_pending_channel = None
+
+
+def _take_pending_channel():
+    global _pending_channel
+    pending = _pending_channel
+    _pending_channel = None
+    if pending is None:
+        return None
+    channel, stamp = pending
+    if time.time() - stamp > _PENDING_CHANNEL_TTL:
+        return None
     return channel
 
 
+def _channel_at_region_point(region, x, y):
+    _, view_y = region.view2d.region_to_view(x - region.x, y - region.y)
+    return max(int(math.floor(view_y)), 1)
+
+
+def _channel_under_mouse(event):
+    """Channel number under the mouse, if it is over a sequencer timeline
+    (the 'WINDOW' region of a non-preview-only Sequencer area) right now."""
+    if event is None:
+        return None
+    mx, my = event.mouse_x, event.mouse_y
+    wm = bpy.context.window_manager
+    if wm is None:
+        return None
+    for window in wm.windows:
+        for area in window.screen.areas:
+            if area.type != 'SEQUENCE_EDITOR':
+                continue
+            space = area.spaces.active
+            if getattr(space, "view_type", "") == 'PREVIEW':
+                continue
+            for region in area.regions:
+                if (region.type == 'WINDOW'
+                        and region.x <= mx < region.x + region.width
+                        and region.y <= my < region.y + region.height):
+                    return _channel_at_region_point(region, mx, my)
+    return None
+
+
+def _highest_channel(se):
+    highest = 0
+    for strip in props.top_level_strips(se):
+        highest = max(highest, strip.channel)
+    return highest
+
+
+def _pick_channel(se, event):
+    pending = _take_pending_channel()
+    if pending is not None:
+        return pending
+    return _channel_under_mouse(event) or (_highest_channel(se) + 1)
+
+
 def create_shape_strip(context, shape_type, width=0, height=0,
-                       offset=(0.0, 0.0), points=None):
+                       offset=(0.0, 0.0), points=None, event=None):
     scene = context.scene
     se = scene.sequence_editor_create()
     tool = scene.vse_shapes_tool
@@ -151,7 +207,7 @@ def create_shape_strip(context, shape_type, width=0, height=0,
     fps = scene.render.fps / scene.render.fps_base
     duration = tool.duration if tool.duration > 0 else max(int(round(fps * 4)), 1)
     frame_start = int(scene.frame_current)
-    channel = _free_channel(se, frame_start, frame_start + duration)
+    channel = _pick_channel(se, event)
 
     if width <= 0:
         width = int(round(scene.render.resolution_y * 0.5))
@@ -221,6 +277,25 @@ _DRAW_ITEMS = (
 )
 
 
+class VSE_SHAPES_OT_add_menu(bpy.types.Operator):
+    """Intercepts Shift+A in the sequencer timeline: remembers the channel
+    under the mouse at this exact keypress, then opens the normal Add menu.
+    A menu popup moves the mouse before "Add Rectangle" etc. actually runs,
+    so this is the only point where the real cursor position is available.
+    """
+    bl_idname = "vse_shapes.add_menu"
+    bl_label = "Add"
+    bl_options = {'INTERNAL'}
+
+    def invoke(self, context, event):
+        global _pending_channel
+        region = context.region
+        if region is not None and region.type == 'WINDOW':
+            channel = _channel_at_region_point(region, event.mouse_x, event.mouse_y)
+            _pending_channel = (channel, time.time())
+        return bpy.ops.wm.call_menu('INVOKE_DEFAULT', name="SEQUENCER_MT_add")
+
+
 class VSE_SHAPES_OT_add(bpy.types.Operator):
     bl_idname = "vse_shapes.add"
     bl_label = "Add Shape"
@@ -233,8 +308,13 @@ class VSE_SHAPES_OT_add(bpy.types.Operator):
     def poll(cls, context):
         return context.scene is not None
 
+    def invoke(self, context, event):
+        self._event = event
+        return self.execute(context)
+
     def execute(self, context):
-        create_shape_strip(context, self.shape_type)
+        create_shape_strip(context, self.shape_type,
+                           event=getattr(self, "_event", None))
         return {'FINISHED'}
 
 
@@ -387,7 +467,7 @@ class VSE_SHAPES_OT_draw(_PreviewModalMixin, bpy.types.Operator):
                     create_shape_strip(
                         context, self.shape_type,
                         width=int(round(w)), height=int(round(h)),
-                        offset=(cx, cy))
+                        offset=(cx, cy), event=event)
                     return {'FINISHED'}
                 return {'CANCELLED'}
         elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
@@ -500,7 +580,7 @@ class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
         elif (event.type in {'RET', 'NUMPAD_ENTER', 'SPACE'}
                 or (event.type == 'RIGHTMOUSE' and self._current is None)):
             if event.value == 'PRESS':
-                return self._confirm(context)
+                return self._confirm(context, event)
         elif event.value == 'PRESS' and (
                 event.type == 'X' or (event.type == 'Z' and event.ctrl)):
             if self._current is None and self._strokes:
@@ -511,7 +591,7 @@ class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
             return {'CANCELLED'}
         return {'RUNNING_MODAL'}
 
-    def _confirm(self, context):
+    def _confirm(self, context, event):
         strokes = [s for s in self._strokes if s]
         self._teardown(context)
         if not strokes:
@@ -529,7 +609,8 @@ class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
             strip.transform.offset_y = cy
             regenerate_strip(context.scene, strip)
         else:
-            create_shape_strip(context, 'FREEHAND', offset=(cx, cy), points=rel)
+            create_shape_strip(context, 'FREEHAND', offset=(cx, cy),
+                               points=rel, event=event)
         return {'FINISHED'}
 
     def _draw_callback(self):
@@ -552,18 +633,42 @@ class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
 
 
 _classes = (
+    VSE_SHAPES_OT_add_menu,
     VSE_SHAPES_OT_add,
     VSE_SHAPES_OT_relocate,
     VSE_SHAPES_OT_draw,
     VSE_SHAPES_OT_draw_stroke,
 )
 
+_addon_keymaps = []
+
+
+def _register_keymaps():
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    if kc is None:  # e.g. running with --factory-startup in some test setups
+        return
+    km = kc.keymaps.new(
+        name="Sequencer", space_type='SEQUENCE_EDITOR', region_type='WINDOW')
+    kmi = km.keymap_items.new(
+        VSE_SHAPES_OT_add_menu.bl_idname, type='A', value='PRESS', shift=True,
+        head=True)
+    _addon_keymaps.append((km, kmi))
+
+
+def _unregister_keymaps():
+    for km, kmi in _addon_keymaps:
+        km.keymap_items.remove(kmi)
+    _addon_keymaps.clear()
+
 
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
+    _register_keymaps()
 
 
 def unregister():
+    _unregister_keymaps()
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

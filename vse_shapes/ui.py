@@ -13,6 +13,9 @@ if _IN_PROPERTIES:
         bl_space_type = 'PROPERTIES'
         bl_region_type = 'WINDOW'
         bl_context = "strip"
+        # Negative sorts before Blender's built-in strip panels (bl_order 0),
+        # so Shapes / Active Shape appear at the top of the Strip tab.
+        bl_order = -100
 else:
     class _PanelBase:
         bl_space_type = 'SEQUENCE_EDITOR'
