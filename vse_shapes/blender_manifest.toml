@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "vse_shapes"
+version = "1.1.0"
+name = "VSE Shapes"
+tagline = "Rectangles, ellipses and freehand drawing in the sequencer"
+maintainer = "volko <volkovolko76@gmail.com>"
+type = "add-on"
+
+tags = ["Sequencer"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Save generated shape images next to the .blend file"
