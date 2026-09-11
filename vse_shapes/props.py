@@ -78,6 +78,7 @@ def _shape_update(self, context):
 _SHAPE_ITEMS = (
     ('RECT', "Rectangle", "Rectangle with optional rounded corners"),
     ('ELLIPSE', "Ellipse", "Ellipse / circle"),
+    ('ARROW', "Arrow", "Arrow shape"),
     ('FREEHAND', "Freehand Stroke", "Hand-drawn brush stroke"),
 )
 
@@ -114,6 +115,14 @@ class VSEShapeSettings(bpy.types.PropertyGroup):
     feather: FloatProperty(
         name="Feather", default=0.0, min=0.0, soft_max=200.0, subtype='PIXEL',
         update=_shape_update, description="Soften the shape edges")
+    arrow_shaft_width: FloatProperty(
+        name="Shaft Thickness", default=0.0, min=0.0, soft_max=500.0,
+        subtype='PIXEL', update=_shape_update,
+        description="Arrow shaft thickness (0 = auto, 35% of height)")
+    arrow_head_length: FloatProperty(
+        name="Head Length", default=0.0, min=0.0, soft_max=1000.0,
+        subtype='PIXEL', update=_shape_update,
+        description="Arrowhead length (0 = auto, 35% of width)")
 
 
 class VSEShapesToolSettings(bpy.types.PropertyGroup):
@@ -133,6 +142,10 @@ class VSEShapesToolSettings(bpy.types.PropertyGroup):
         name="Corner Radius", default=0.0, min=0.0, soft_max=1000.0, subtype='PIXEL')
     feather: FloatProperty(
         name="Feather", default=0.0, min=0.0, soft_max=200.0, subtype='PIXEL')
+    arrow_shaft_width: FloatProperty(
+        name="Shaft Thickness", default=0.0, min=0.0, soft_max=500.0, subtype='PIXEL')
+    arrow_head_length: FloatProperty(
+        name="Head Length", default=0.0, min=0.0, soft_max=1000.0, subtype='PIXEL')
     brush_size: FloatProperty(
         name="Brush Size", default=14.0, min=1.0, soft_max=300.0, subtype='PIXEL')
     brush_color: FloatVectorProperty(

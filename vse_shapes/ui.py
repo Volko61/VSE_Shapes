@@ -52,6 +52,8 @@ class VSE_SHAPES_PT_add(_PanelBase, bpy.types.Panel):
                      icon='MESH_PLANE').shape_type = 'RECT'
         row.operator("vse_shapes.add", text="Ellipse",
                      icon='MESH_CIRCLE').shape_type = 'ELLIPSE'
+        row.operator("vse_shapes.add", text="Arrow",
+                     icon='FORWARD').shape_type = 'ARROW'
 
         col = layout.column(align=True)
         col.label(text="Draw (drag in preview):")
@@ -59,13 +61,19 @@ class VSE_SHAPES_PT_add(_PanelBase, bpy.types.Panel):
                      icon='MESH_PLANE').shape_type = 'RECT'
         col.operator("vse_shapes.draw", text="Draw Ellipse",
                      icon='MESH_CIRCLE').shape_type = 'ELLIPSE'
+        col.operator("vse_shapes.draw", text="Draw Arrow",
+                     icon='FORWARD').shape_type = 'ARROW'
         col.operator("vse_shapes.draw_stroke", text="Free Draw",
                      icon='GREASEPENCIL')
 
-        row = layout.row()
+        row = layout.row(align=True)
         row.enabled = _is_freehand(_active_shape_strip(context))
         row.operator("vse_shapes.draw_stroke", text="Edit Drawing",
                      icon='GREASEPENCIL').edit = True
+        op = row.operator("vse_shapes.draw_stroke", text="Eraser",
+                          icon='X')
+        op.edit = True
+        op.mode = 'ERASE'
 
         if ops.needs_relocate(context.scene):
             layout.separator()
@@ -99,6 +107,8 @@ class VSE_SHAPES_PT_defaults(_PanelBase, bpy.types.Panel):
         col = layout.column()
         col.prop(tool, "corner_radius")
         col.prop(tool, "feather")
+        col.prop(tool, "arrow_shaft_width")
+        col.prop(tool, "arrow_head_length")
 
         col = layout.column()
         col.prop(tool, "brush_color")
@@ -127,8 +137,13 @@ class VSE_SHAPES_PT_active(_PanelBase, bpy.types.Panel):
             col.prop(sh, "stroke_width", text="Brush Size")
             col.prop(sh, "feather")
             col.separator()
-            col.operator("vse_shapes.draw_stroke", text="Edit Drawing",
+            row = col.row(align=True)
+            row.operator("vse_shapes.draw_stroke", text="Edit Drawing",
                          icon='GREASEPENCIL').edit = True
+            op = row.operator("vse_shapes.draw_stroke", text="Eraser",
+                              icon='X')
+            op.edit = True
+            op.mode = 'ERASE'
             return
 
         col = layout.column()
@@ -136,6 +151,9 @@ class VSE_SHAPES_PT_active(_PanelBase, bpy.types.Panel):
         col.separator()
         col.prop(sh, "width")
         col.prop(sh, "height")
+        if sh.shape_type == 'ARROW':
+            col.prop(sh, "arrow_shaft_width")
+            col.prop(sh, "arrow_head_length")
 
         col = layout.column(heading="Fill")
         col.prop(sh, "fill", text="")
@@ -166,9 +184,12 @@ class VSE_SHAPES_MT_add(bpy.types.Menu):
                         icon='MESH_PLANE').shape_type = 'RECT'
         layout.operator("vse_shapes.add", text="Ellipse",
                         icon='MESH_CIRCLE').shape_type = 'ELLIPSE'
+        layout.operator("vse_shapes.add", text="Arrow",
+                        icon='FORWARD').shape_type = 'ARROW'
         layout.separator()
         layout.operator("vse_shapes.draw", text="Draw Rectangle").shape_type = 'RECT'
         layout.operator("vse_shapes.draw", text="Draw Ellipse").shape_type = 'ELLIPSE'
+        layout.operator("vse_shapes.draw", text="Draw Arrow").shape_type = 'ARROW'
         layout.operator("vse_shapes.draw_stroke", text="Free Draw",
                         icon='GREASEPENCIL')
 

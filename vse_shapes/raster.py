@@ -35,9 +35,54 @@ def _compose(a_fill, fill_rgba, a_stroke, stroke_rgba):
     return out
 
 
+def _arrow_sdf(x, y, w, h, shaft_width, head_length):
+    hw = w * 0.5
+    hh = h * 0.5
+    hl = float(head_length) if head_length > 0.0 else min(w * 0.35, hh * 1.8)
+    hl = max(min(hl, w - 2.0), 4.0)
+    x_head = hw - hl
+    st = float(shaft_width) if shaft_width > 0.0 else h * 0.35
+    st = max(min(st, h), 1.0)
+    sy = st * 0.5
+
+    verts = [
+        (hw, 0.0),
+        (x_head, -hh),
+        (x_head, -sy),
+        (-hw, -sy),
+        (-hw, sy),
+        (x_head, sy),
+        (x_head, hh),
+    ]
+
+    min_d2 = None
+    n = len(verts)
+    for i in range(n):
+        ax, ay = verts[i]
+        bx, by = verts[(i + 1) % n]
+        dx = bx - ax
+        dy = by - ay
+        l2 = dx * dx + dy * dy
+        if l2 < 1e-6:
+            continue
+        t = np.clip(((x - ax) * dx + (y - ay) * dy) / l2, 0.0, 1.0)
+        px = ax + t * dx
+        py = ay + t * dy
+        d2 = (x - px) ** 2 + (y - py) ** 2
+        min_d2 = d2 if min_d2 is None else np.minimum(min_d2, d2)
+
+    dist = np.sqrt(min_d2)
+    abs_y = np.abs(y)
+    in_shaft = (x >= -hw) & (x <= x_head) & (abs_y <= sy)
+    in_head = (x >= x_head) & (x <= hw) & (abs_y <= hh * (hw - x) / max(hl, 1e-4))
+    inside = in_shaft | in_head
+    return np.where(inside, -dist, dist)
+
+
 def render_shape(shape_type, width, height, fill, fill_color, stroke,
-                 stroke_color, stroke_width, corner_radius, feather):
-    """Render a rectangle or ellipse. The shape is centered in the image."""
+                 stroke_color, stroke_width, corner_radius, feather,
+                 arrow_shaft_width=0.0, arrow_head_length=0.0):
+    """Render a rectangle, ellipse or arrow. The shape is centered in the image."""
     stroke = stroke and stroke_width > 0.0
     feather = max(float(feather), 0.0)
     margin = int(math.ceil((stroke_width * 0.5 if stroke else 0.0) + feather + 2.0))
@@ -58,6 +103,8 @@ def render_shape(shape_type, width, height, fill, fill_color, stroke,
         outside = np.sqrt(np.maximum(qx, 0.0) ** 2 + np.maximum(qy, 0.0) ** 2)
         inside = np.minimum(np.maximum(qx, qy), 0.0)
         sdf = outside + inside - r
+    elif shape_type == 'ARROW':
+        sdf = _arrow_sdf(x, y, w, h, arrow_shaft_width, arrow_head_length)
     else:  # ELLIPSE
         a = max(hw, 1e-3)
         b = max(hh, 1e-3)

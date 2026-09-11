@@ -9,6 +9,7 @@ import uuid
 
 import bpy
 import gpu
+import numpy as np
 from bpy.props import BoolProperty, EnumProperty
 from gpu_extras.batch import batch_for_shader
 
@@ -87,7 +88,8 @@ def _render_pixels(sh):
         sh.shape_type, sh.width, sh.height,
         sh.fill, tuple(sh.fill_color),
         sh.stroke, tuple(sh.stroke_color), sh.stroke_width,
-        sh.corner_radius, sh.feather)
+        sh.corner_radius, sh.feather,
+        sh.arrow_shaft_width, sh.arrow_head_length)
 
 
 def regenerate_strip(scene, strip):
@@ -129,7 +131,12 @@ def needs_relocate(scene):
 
 # ---------------------------------------------------------- strip creation
 
-_SHAPE_LABELS = {'RECT': "Rectangle", 'ELLIPSE': "Ellipse", 'FREEHAND': "Stroke"}
+_SHAPE_LABELS = {
+    'RECT': "Rectangle",
+    'ELLIPSE': "Ellipse",
+    'ARROW': "Arrow",
+    'FREEHAND': "Stroke",
+}
 
 
 # Channel captured by VSE_SHAPES_OT_add_menu at the moment Shift+A was
@@ -199,7 +206,7 @@ def _pick_channel(se, event):
 
 
 def create_shape_strip(context, shape_type, width=0, height=0,
-                       offset=(0.0, 0.0), points=None, event=None):
+                       offset=(0.0, 0.0), rotation=0.0, points=None, event=None):
     scene = context.scene
     se = scene.sequence_editor_create()
     tool = scene.vse_shapes_tool
@@ -212,7 +219,7 @@ def create_shape_strip(context, shape_type, width=0, height=0,
     if width <= 0:
         width = int(round(scene.render.resolution_y * 0.5))
     if height <= 0:
-        height = width
+        height = int(round(width * 0.35)) if shape_type == 'ARROW' else width
 
     uid = uuid.uuid4().hex
     if shape_type == 'FREEHAND':
@@ -223,7 +230,8 @@ def create_shape_strip(context, shape_type, width=0, height=0,
             shape_type, width, height,
             tool.fill, tuple(tool.fill_color),
             tool.stroke, tuple(tool.stroke_color), tool.stroke_width,
-            tool.corner_radius, tool.feather)
+            tool.corner_radius, tool.feather,
+            tool.arrow_shaft_width, tool.arrow_head_length)
     filepath = path_for_uid(uid)
     raster.write_png(pixels, filepath)
 
@@ -253,6 +261,8 @@ def create_shape_strip(context, shape_type, width=0, height=0,
         sh.stroke_width = tool.stroke_width
         sh.corner_radius = tool.corner_radius
         sh.feather = tool.feather
+        sh.arrow_shaft_width = tool.arrow_shaft_width
+        sh.arrow_head_length = tool.arrow_head_length
         if shape_type == 'FREEHAND':
             sh.fill_color = tool.brush_color
             sh.stroke_width = tool.brush_size
@@ -260,6 +270,7 @@ def create_shape_strip(context, shape_type, width=0, height=0,
 
     strip.transform.offset_x = float(offset[0])
     strip.transform.offset_y = float(offset[1])
+    strip.transform.rotation = float(rotation)
 
     for other in props.strips_of(scene):
         other.select = False
@@ -274,6 +285,7 @@ def create_shape_strip(context, shape_type, width=0, height=0,
 _DRAW_ITEMS = (
     ('RECT', "Rectangle", ""),
     ('ELLIPSE', "Ellipse", ""),
+    ('ARROW', "Arrow", ""),
 )
 
 
@@ -437,11 +449,14 @@ class VSE_SHAPES_OT_draw(_PreviewModalMixin, bpy.types.Operator):
         self._end = (0.0, 0.0)
         self._uniform = False
         self._from_center = False
-        if not self._setup(
-                context,
-                "Drag in the preview to draw a %s   |   Shift: 1:1 ratio   "
-                "Ctrl: from center   Esc/RMB: cancel"
-                % _SHAPE_LABELS[self.shape_type].lower()):
+        if self.shape_type == 'ARROW':
+            status = ("Drag in preview from tail to tip   |   Shift: snap angle (15°)   "
+                      "Ctrl: from center   Esc/RMB: cancel")
+        else:
+            status = ("Drag in the preview to draw a %s   |   Shift: 1:1 ratio   "
+                      "Ctrl: from center   Esc/RMB: cancel"
+                      % _SHAPE_LABELS[self.shape_type].lower())
+        if not self._setup(context, status):
             return {'CANCELLED'}
         return {'RUNNING_MODAL'}
 
@@ -461,14 +476,23 @@ class VSE_SHAPES_OT_draw(_PreviewModalMixin, bpy.types.Operator):
                 self._end = self._mouse_view(event)
                 self._uniform = event.shift
                 self._from_center = event.ctrl
-                cx, cy, w, h = self._rect()
                 self._teardown(context)
-                if w >= 2.0 and h >= 2.0:
-                    create_shape_strip(
-                        context, self.shape_type,
-                        width=int(round(w)), height=int(round(h)),
-                        offset=(cx, cy), event=event)
-                    return {'FINISHED'}
+                if self.shape_type == 'ARROW':
+                    cx, cy, w, h, ang = self._arrow_geom()
+                    if w >= 2.0 and h >= 2.0:
+                        create_shape_strip(
+                            context, 'ARROW',
+                            width=int(round(w)), height=int(round(h)),
+                            offset=(cx, cy), rotation=ang, event=event)
+                        return {'FINISHED'}
+                else:
+                    cx, cy, w, h = self._rect()
+                    if w >= 2.0 and h >= 2.0:
+                        create_shape_strip(
+                            context, self.shape_type,
+                            width=int(round(w)), height=int(round(h)),
+                            offset=(cx, cy), event=event)
+                        return {'FINISHED'}
                 return {'CANCELLED'}
         elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
             self._teardown(context)
@@ -488,19 +512,75 @@ class VSE_SHAPES_OT_draw(_PreviewModalMixin, bpy.types.Operator):
             return x0, y0, abs(dx) * 2.0, abs(dy) * 2.0
         return x0 + dx * 0.5, y0 + dy * 0.5, abs(dx), abs(dy)
 
+    def _arrow_geom(self):
+        x0, y0 = self._start
+        x1, y1 = self._end
+        dx = x1 - x0
+        dy = y1 - y0
+        ang = math.atan2(dy, dx)
+        length = math.hypot(dx, dy)
+        if self._uniform:
+            ang = round(ang / (math.pi / 12.0)) * (math.pi / 12.0)
+            dx = length * math.cos(ang)
+            dy = length * math.sin(ang)
+        if self._from_center:
+            cx, cy = x0, y0
+            length *= 2.0
+        else:
+            cx, cy = x0 + dx * 0.5, y0 + dy * 0.5
+        h = max(min(length * 0.35, 300.0), 20.0)
+        return cx, cy, max(length, 2.0), h, ang
+
     def _draw_callback(self):
         if self._state != 'DRAG' or not self._is_own_region():
             return
         region = bpy.context.region
-        cx, cy, w, h = self._rect()
-        hw, hh = w * 0.5, h * 0.5
-        if self.shape_type == 'RECT':
+        if self.shape_type == 'ARROW':
+            cx, cy, w, h, ang = self._arrow_geom()
+            hw = w * 0.5
+            hh = h * 0.5
+            hl = min(w * 0.35, hh * 1.8)
+            hl = max(min(hl, w - 2.0), 4.0)
+            x_head = hw - hl
+            st = h * 0.35
+            sy = st * 0.5
+            local_verts = [
+                (hw, 0.0),
+                (x_head, -hh),
+                (x_head, -sy),
+                (-hw, -sy),
+                (-hw, sy),
+                (x_head, sy),
+                (x_head, hh),
+                (hw, 0.0),
+            ]
+            cos_a = math.cos(ang)
+            sin_a = math.sin(ang)
+            pts = [(cx + lx * cos_a - ly * sin_a, cy + lx * sin_a + ly * cos_a)
+                   for lx, ly in local_verts]
+        elif self.shape_type == 'RECT':
+            cx, cy, w, h = self._rect()
+            hw, hh = w * 0.5, h * 0.5
             pts = [(cx - hw, cy - hh), (cx + hw, cy - hh),
                    (cx + hw, cy + hh), (cx - hw, cy + hh), (cx - hw, cy - hh)]
-        else:
+        else:  # ELLIPSE
+            cx, cy, w, h = self._rect()
+            hw, hh = w * 0.5, h * 0.5
             pts = [(cx + hw * math.cos(t), cy + hh * math.sin(t))
                    for t in (i * (2.0 * math.pi / 64.0) for i in range(65))]
         self._draw_lines(region, pts, (1.0, 1.0, 1.0, 0.9), 2.0)
+
+
+def _dist_pt_to_seg(p, a, b):
+    abx = b[0] - a[0]
+    aby = b[1] - a[1]
+    l2 = abx * abx + aby * aby
+    if l2 < 1e-6:
+        return math.hypot(p[0] - a[0], p[1] - a[1])
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / l2))
+    px = a[0] + t * abx
+    py = a[1] + t * aby
+    return math.hypot(p[0] - px, p[1] - py)
 
 
 class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
@@ -514,19 +594,137 @@ class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
         name="Edit Existing", default=False, options={'SKIP_SAVE'},
         description="Continue drawing on the active freehand strip")
 
+    mode: EnumProperty(
+        name="Mode",
+        items=(
+            ('DRAW', "Draw", "Draw brush strokes"),
+            ('ERASE', "Erase", "Erase existing strokes"),
+        ),
+        default='DRAW',
+        options={'SKIP_SAVE'},
+    )
+
     @classmethod
     def poll(cls, context):
         return context.scene is not None
 
+    def _status_text(self):
+        if self.mode == 'ERASE':
+            return ("LMB: erase   |   Shift: erase whole stroke   "
+                    "E: draw mode   [/]: eraser size (%dpx)   "
+                    "Ctrl+Z/X: undo   Enter/Space/RMB: finish   Esc: cancel"
+                    % int(round(self._eraser_size)))
+        arrow_str = "ON" if self._straight_arrow else "OFF"
+        return ("LMB: draw   |   Shift: straight line (Ctrl: snap 15°)   "
+                "A: arrow (%s)   E: eraser   [/]: brush size (%dpx)   "
+                "Ctrl+Z/X: undo   Enter/Space/RMB: finish   Esc: cancel"
+                % (arrow_str, int(round(self._brush_size))))
+
+    def _make_straight_stroke(self, p0, p1):
+        if not self._straight_arrow:
+            return [p0, p1]
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+        dist = math.hypot(dx, dy)
+        if dist < 4.0:
+            return [p0, p1]
+        head_len = min(max(self._brush_size * 2.5, 20.0), dist * 0.45)
+        ang = math.atan2(dy, dx)
+        barb_ang = 0.5
+        b1 = (p1[0] - head_len * math.cos(ang - barb_ang),
+              p1[1] - head_len * math.sin(ang - barb_ang))
+        b2 = (p1[0] - head_len * math.cos(ang + barb_ang),
+              p1[1] - head_len * math.sin(ang + barb_ang))
+        return [p0, p1, b1, p1, b2]
+
+    def _erase_at(self, pt, whole_stroke=False):
+        cx, cy = pt
+        r = self._eraser_size
+        new_strokes = []
+        changed = False
+
+        for stroke in self._strokes:
+            if not stroke:
+                continue
+            xs = [p[0] for p in stroke]
+            ys = [p[1] for p in stroke]
+            if (min(xs) > cx + r or max(xs) < cx - r or
+                    min(ys) > cy + r or max(ys) < cy - r):
+                new_strokes.append(stroke)
+                continue
+
+            if whole_stroke:
+                hit = False
+                if len(stroke) == 1:
+                    hit = (math.hypot(stroke[0][0] - cx, stroke[0][1] - cy) <= r)
+                else:
+                    for i in range(len(stroke) - 1):
+                        if _dist_pt_to_seg(pt, stroke[i], stroke[i + 1]) <= r:
+                            hit = True
+                            break
+                if hit:
+                    changed = True
+                else:
+                    new_strokes.append(stroke)
+            else:
+                step = max(r * 0.35, 2.0)
+                dense_pts = []
+                if len(stroke) == 1:
+                    dense_pts = stroke
+                else:
+                    for i in range(len(stroke) - 1):
+                        p_a = stroke[i]
+                        p_b = stroke[i + 1]
+                        d = math.hypot(p_b[0] - p_a[0], p_b[1] - p_a[1])
+                        n = max(int(math.ceil(d / step)), 1)
+                        for k in range(n):
+                            t = k / n
+                            dense_pts.append((p_a[0] + (p_b[0] - p_a[0]) * t,
+                                              p_a[1] + (p_b[1] - p_a[1]) * t))
+                    dense_pts.append(stroke[-1])
+
+                runs = []
+                curr_run = []
+                for p in dense_pts:
+                    if math.hypot(p[0] - cx, p[1] - cy) > r:
+                        curr_run.append(p)
+                    else:
+                        if curr_run:
+                            runs.append(curr_run)
+                            curr_run = []
+                if curr_run:
+                    runs.append(curr_run)
+
+                if len(runs) != 1 or len(runs[0]) != len(dense_pts):
+                    changed = True
+                    for run in runs:
+                        if len(run) >= 2:
+                            new_strokes.append(run)
+                        elif len(run) == 1:
+                            new_strokes.append([run[0], run[0]])
+                else:
+                    new_strokes.append(stroke)
+
+        if changed:
+            self._strokes = new_strokes
+            self._area.tag_redraw()
+
     def invoke(self, context, event):
         self._strokes = []
         self._current = None
+        self._start_pos = None
+        self._is_straight = False
+        self._straight_arrow = False
         self._strip = None
         self._prev_mute = False
+        self._history = []
+        self._mouse_pos = (0.0, 0.0)
+        self._is_erasing_drag = False
 
         tool = context.scene.vse_shapes_tool
         self._brush_color = tuple(tool.brush_color)
         self._brush_size = tool.brush_size
+        self._eraser_size = max(self._brush_size * 1.5, 20.0)
 
         if self.edit:
             se = context.scene.sequence_editor
@@ -538,15 +736,13 @@ class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
             self._strip = strip
             self._brush_color = tuple(sh.fill_color)
             self._brush_size = sh.stroke_width
+            self._eraser_size = max(self._brush_size * 1.5, 20.0)
             ox = strip.transform.offset_x
             oy = strip.transform.offset_y
             self._strokes = [[(x + ox, y + oy) for x, y in stroke]
                              for stroke in parse_strokes(sh.points)]
 
-        if not self._setup(
-                context,
-                "LMB: draw strokes   |   Enter/Space/RMB: finish   "
-                "Ctrl+Z or X: undo last stroke   Esc: cancel"):
+        if not self._setup(context, self._status_text()):
             return {'CANCELLED'}
 
         if self._strip is not None:
@@ -562,39 +758,115 @@ class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
         super()._teardown(context)
 
     def modal(self, context, event):
+        self._mouse_pos = self._mouse_view(event)
+
         if event.type == 'MOUSEMOVE':
-            if self._current is not None:
-                x, y = self._mouse_view(event)
-                px, py = self._current[-1]
-                if math.hypot(x - px, y - py) >= 1.5:
-                    self._current.append((x, y))
-                    self._area.tag_redraw()
+            if self.mode == 'ERASE':
+                if self._is_erasing_drag:
+                    self._erase_at(self._mouse_pos, event.shift)
+                self._area.tag_redraw()
+            else:
+                if self._current is not None:
+                    x, y = self._mouse_pos
+                    if event.shift or self._is_straight:
+                        p0 = self._start_pos
+                        p1 = (x, y)
+                        if event.ctrl:
+                            dx = p1[0] - p0[0]
+                            dy = p1[1] - p0[1]
+                            dist = math.hypot(dx, dy)
+                            ang = round(math.atan2(dy, dx) / (math.pi / 12.0)) * (math.pi / 12.0)
+                            p1 = (p0[0] + dist * math.cos(ang), p0[1] + dist * math.sin(ang))
+                        self._current = self._make_straight_stroke(p0, p1)
+                        self._area.tag_redraw()
+                    else:
+                        px, py = self._current[-1]
+                        if math.hypot(x - px, y - py) >= 1.5:
+                            self._current.append((x, y))
+                            self._area.tag_redraw()
+
         elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             if self._mouse_inside(event):
-                self._current = [self._mouse_view(event)]
+                self._history.append([list(s) for s in self._strokes])
+                if len(self._history) > 50:
+                    self._history.pop(0)
+                if self.mode == 'ERASE':
+                    self._is_erasing_drag = True
+                    self._erase_at(self._mouse_pos, event.shift)
+                else:
+                    self._start_pos = self._mouse_pos
+                    if event.shift:
+                        self._is_straight = True
+                        self._current = self._make_straight_stroke(self._start_pos, self._start_pos)
+                    else:
+                        self._is_straight = False
+                        self._current = [self._start_pos]
+
         elif event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
-            if self._current is not None:
-                self._strokes.append(self._current)
-                self._current = None
-                self._area.tag_redraw()
+            if self.mode == 'ERASE':
+                self._is_erasing_drag = False
+            else:
+                if self._current is not None:
+                    self._strokes.append(self._current)
+                    self._current = None
+                    self._is_straight = False
+                    self._area.tag_redraw()
+
+        elif event.type == 'E' and event.value == 'PRESS':
+            self.mode = 'ERASE' if self.mode == 'DRAW' else 'DRAW'
+            context.workspace.status_text_set(self._status_text())
+            self._area.tag_redraw()
+
+        elif event.type == 'A' and event.value == 'PRESS':
+            self._straight_arrow = not self._straight_arrow
+            context.workspace.status_text_set(self._status_text())
+            self._area.tag_redraw()
+
+        elif event.type in {'LEFT_BRACKET', 'RIGHT_BRACKET'} and event.value == 'PRESS':
+            delta = -4.0 if event.type == 'LEFT_BRACKET' else 4.0
+            if self.mode == 'ERASE':
+                self._eraser_size = max(4.0, min(self._eraser_size + delta, 300.0))
+            else:
+                self._brush_size = max(1.0, min(self._brush_size + delta, 300.0))
+            context.workspace.status_text_set(self._status_text())
+            self._area.tag_redraw()
+
         elif (event.type in {'RET', 'NUMPAD_ENTER', 'SPACE'}
-                or (event.type == 'RIGHTMOUSE' and self._current is None)):
+                or (event.type == 'RIGHTMOUSE' and self._current is None and not self._is_erasing_drag)):
             if event.value == 'PRESS':
                 return self._confirm(context, event)
+
         elif event.value == 'PRESS' and (
                 event.type == 'X' or (event.type == 'Z' and event.ctrl)):
-            if self._current is None and self._strokes:
-                self._strokes.pop()
-                self._area.tag_redraw()
+            if self._current is None:
+                if self._history:
+                    self._strokes = self._history.pop()
+                    self._area.tag_redraw()
+                elif self._strokes:
+                    self._strokes.pop()
+                    self._area.tag_redraw()
+
         elif event.type == 'ESC' and event.value == 'PRESS':
             self._teardown(context)
             return {'CANCELLED'}
+
         return {'RUNNING_MODAL'}
 
     def _confirm(self, context, event):
         strokes = [s for s in self._strokes if s]
         self._teardown(context)
         if not strokes:
+            if self._strip is not None:
+                strip = self._strip
+                with props.suppressed():
+                    strip.vse_shape.points = dump_strokes([])
+                filepath = path_for_uid(strip.vse_shape.uid)
+                blank = np.zeros((2, 2, 4), np.float32)
+                raster.write_png(blank, filepath)
+                _retarget(strip, filepath)
+                _invalidate(strip)
+                _redraw_sequencers()
+                return {'FINISHED'}
             return {'CANCELLED'}
         xs = [p[0] for s in strokes for p in s]
         ys = [p[1] for s in strokes for p in s]
@@ -617,7 +889,6 @@ class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
         if not self._is_own_region():
             return
         region = bpy.context.region
-        # Convert the brush size (frame pixels) to region pixels at current zoom.
         x0, _ = region.view2d.view_to_region(0.0, 0.0, clip=False)
         x1, _ = region.view2d.view_to_region(100.0, 0.0, clip=False)
         scale = abs(x1 - x0) / 100.0
@@ -630,6 +901,12 @@ class VSE_SHAPES_OT_draw_stroke(_PreviewModalMixin, bpy.types.Operator):
                 self._draw_lines(region, pts, color, width)
         if self._current and len(self._current) > 1:
             self._draw_lines(region, self._current, color, width)
+        if self.mode == 'ERASE':
+            mx, my = self._mouse_pos
+            r = self._eraser_size
+            circle_pts = [(mx + r * math.cos(t), my + r * math.sin(t))
+                          for t in (i * (2.0 * math.pi / 32.0) for i in range(33))]
+            self._draw_lines(region, circle_pts, (1.0, 0.3, 0.3, 0.85), 2.0)
 
 
 _classes = (
