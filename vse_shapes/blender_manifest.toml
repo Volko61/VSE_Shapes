@@ -3,7 +3,7 @@ schema_version = "1.0.0"
 id = "vse_shapes"
 version = "1.4.0"
 name = "VSE Shapes"
-tagline = "Rectangles, ellipses, arrows and freehand drawing in the sequencer"
+tagline = "Rectangles, ellipses, arrows and drawing in the sequencer"
 maintainer = "volko <volkovolko76@gmail.com>"
 type = "add-on"
 
