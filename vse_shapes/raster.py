@@ -191,12 +191,16 @@ def write_png(rgba, filepath):
     """Save a linear straight-alpha RGBA float array as an 8-bit sRGB PNG."""
     ih, iw = rgba.shape[:2]
     img = bpy.data.images.get(_BUFFER_IMAGE)
-    if img is not None and (img.size[0] != iw or img.size[1] != ih):
+    # The buffer is file-backed after a save; once that file is deleted (e.g.
+    # an unused baked frame) a reload leaves its pixel buffer empty. Setting
+    # the colorspace reloads, so only do it on a fresh buffer.
+    if img is not None and (img.size[0] != iw or img.size[1] != ih
+                            or len(img.pixels) != iw * ih * 4):
         bpy.data.images.remove(img)
         img = None
     if img is None:
         img = bpy.data.images.new(_BUFFER_IMAGE, iw, ih, alpha=True, float_buffer=False)
-    img.colorspace_settings.name = 'sRGB'
+        img.colorspace_settings.name = 'sRGB'
 
     encoded = np.empty((ih, iw, 4), np.float32)
     encoded[..., :3] = linear_to_srgb(rgba[..., :3])

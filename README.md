@@ -20,6 +20,10 @@ Sequence Editor. Works with Blender 4.2+ including the Blender 5.x series.
 - **Full styling** — fill on/off + color, stroke on/off + color + thickness,
   arrow shaft width & head length, rounded corners, edge feather, opacity.
   All editable live after creation from the *Active Shape* panel.
+- **Keyframeable styles** — click the diamond next to width/height, fill and
+  stroke colors, stroke width, corner radius, feather, arrow dimensions or
+  brush size/color to key it at the current frame. Keys show up in the Dope
+  Sheet and Graph Editor like any other animation.
 - **Native transforms** — shapes are regular image strips, so position,
   rotation, scale and opacity use Blender's built-in (and animatable) strip
   transform.
@@ -30,12 +34,12 @@ Sequence Editor. Works with Blender 4.2+ including the Blender 5.x series.
 
 1. In Blender: `Edit ▸ Preferences ▸ Get Extensions ▸ ⌄ (top-right arrow) ▸
    Install from Disk…`
-2. Pick `dist/vse_shapes-1.4.0.zip`.
+2. Pick `dist/vse_shapes-1.5.0.zip`.
 
 Or from the command line:
 
 ```
-blender --command extension install-file -r user_default --enable dist/vse_shapes-1.4.0.zip
+blender --command extension install-file -r user_default --enable dist/vse_shapes-1.5.0.zip
 ```
 
 To rebuild the zip after changing the source:
@@ -65,6 +69,9 @@ Everything is also available in the sequencer's `Add ▸ Shape` menu.
   to newly created shapes.
 - **Active Shape** panel: edit the selected shape — type, size, fill, stroke,
   corner radius, feather, arrow shaft/head dimensions, brush size/color. Changes re-render instantly.
+  The diamond next to a property inserts a keyframe at the current frame
+  (click it again on a keyed frame to delete the key); *Clear Shape Animation*
+  removes all style keys of the shape.
   Position, rotation, scale and opacity use Blender's native Transform and
   Compositing panels in the same tab.
 
@@ -81,5 +88,9 @@ save, so nothing gets lost).
 
 - Since shapes are plain image strips, projects still render fine on
   machines without the extension installed.
-- The shape style properties re-render the PNG, so they are not
-  keyframeable; use the native strip transform + opacity for animation.
+- Animated shapes are baked into an image sequence (one element per frame;
+  identical frames share one PNG). The bake reruns automatically, shortly
+  after you edit keys, move/trim the strip or change a setting. Long, large
+  animations take a moment to bake and some disk space.
+- Use the panel's diamond buttons to key shape styles: Blender's `I` key and
+  right-click *Insert Keyframe* can't reach these properties.

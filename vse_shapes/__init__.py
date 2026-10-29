@@ -1,8 +1,8 @@
 """VSE Shapes — rectangles, ellipses and freehand drawing for the sequencer."""
 
-from . import ops, props, ui
+from . import anim, ops, props, ui
 
-_modules = (props, ops, ui)
+_modules = (props, anim, ops, ui)
 
 
 def register():

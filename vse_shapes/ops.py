@@ -1,5 +1,6 @@
 """Operators: add shapes, drag-draw shapes in the preview, freehand drawing."""
 
+import hashlib
 import json
 import math
 import os
@@ -10,10 +11,10 @@ import uuid
 import bpy
 import gpu
 import numpy as np
-from bpy.props import BoolProperty, EnumProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 from gpu_extras.batch import batch_for_shader
 
-from . import props, raster
+from . import anim, props, raster
 
 
 # ------------------------------------------------------------------ files
@@ -110,11 +111,133 @@ def regenerate_strip(scene, strip):
         with props.suppressed():
             sh.uid = uuid.uuid4().hex
 
-    filepath = path_for_uid(sh.uid)
-    raster.write_png(_render_pixels(sh), filepath)
-    _retarget(strip, filepath)
+    fcurves = anim.shape_fcurves(scene, strip)
+    if fcurves:
+        _bake_strip(strip, fcurves)
+        sig = anim.signature(strip, fcurves)
+    else:
+        frame_end = strip.frame_final_end
+        _set_element_count(strip, 1)
+        filepath = path_for_uid(sh.uid)
+        raster.write_png(_render_pixels(sh), filepath)
+        _retarget(strip, filepath)
+        if strip.frame_final_end != frame_end:
+            strip.frame_final_end = frame_end  # single images stretch freely
+        sig = ""
+    if sh.anim_sig != sig:
+        with props.suppressed():
+            sh.anim_sig = sig
+    _remove_unused_frames(sh.uid)
     _invalidate(strip)
     _redraw_sequencers()
+
+
+# ------------------------------------------------------- animation baking
+
+def _frame_path(uid, key):
+    return os.path.join(shapes_dir(), "shape_%s_%s.png" % (uid, key))
+
+
+def _pad(rgba, ih, iw):
+    """Center `rgba` on a transparent (ih, iw) canvas."""
+    h, w = rgba.shape[:2]
+    if (h, w) == (ih, iw):
+        return rgba
+    out = np.zeros((ih, iw, 4), np.float32)
+    y0 = (ih - h) // 2
+    x0 = (iw - w) // 2
+    out[y0:y0 + h, x0:x0 + w] = rgba
+    return out
+
+
+def _set_element_count(strip, count):
+    elements = strip.elements
+    while len(elements) > count:
+        elements.pop(len(elements) - 1)
+    while len(elements) < count:
+        elements.append(elements[len(elements) - 1].filename)
+
+
+def _bake_strip(strip, fcurves):
+    """Render the animated shape as an image sequence covering the strip's
+    visible range. Every frame is padded to one canvas so the shape stays
+    centered while its size changes."""
+    sh = strip.vse_shape
+    content_start = int(round(strip.frame_start))
+    frame_start = int(strip.frame_final_start)
+    frame_end = int(strip.frame_final_end)
+    count = max(frame_end - content_start, 1)
+
+    keys = []
+    states = {}
+    for i in range(count):
+        # Frames trimmed off the head of the strip are never shown.
+        values = anim.values_at(sh, fcurves, max(content_start + i, frame_start))
+        key = hashlib.md5(repr(sorted(vars(values).items())).encode()).hexdigest()[:12]
+        keys.append(key)
+        if key not in states:
+            states[key] = values
+
+    pixels = {key: _render_pixels(values) for key, values in states.items()}
+    ih = max(p.shape[0] for p in pixels.values())
+    iw = max(p.shape[1] for p in pixels.values())
+    names = {}
+    for key, rgba in pixels.items():
+        # The canvas size is part of the image, so it is part of the name.
+        file_key = "%s%dx%d" % (key, iw, ih)
+        filepath = _frame_path(sh.uid, file_key)
+        if not os.path.exists(filepath):
+            raster.write_png(_pad(rgba, ih, iw), filepath)
+        names[key] = os.path.basename(filepath)
+
+    # Shrink before growing so the strip never overlaps a neighbor; with no
+    # end offset the content then ends exactly where the strip did.
+    _set_element_count(strip, 1)
+    strip.frame_offset_end = 0
+    strip.directory = shapes_dir()
+    strip.elements[0].filename = names[keys[0]]
+    for key in keys[1:]:
+        strip.elements.append(names[key])
+
+
+def _referenced_files():
+    used = set()
+    for scene in bpy.data.scenes:
+        for strip in props.strips_of(scene):
+            sh = getattr(strip, "vse_shape", None)
+            if sh is None or not sh.is_shape:
+                continue
+            directory = os.path.normcase(os.path.normpath(bpy.path.abspath(strip.directory)))
+            for element in strip.elements:
+                used.add(os.path.join(directory, os.path.normcase(element.filename)))
+    return used
+
+
+def _remove_unused_frames(uid):
+    """Delete baked frames of `uid` that no strip shows any more."""
+    directory = shapes_dir()
+    if not os.path.isdir(directory):
+        return
+    prefix = "shape_%s_" % uid
+    used = None
+    for filename in os.listdir(directory):
+        if not (filename.startswith(prefix) and filename.endswith(".png")):
+            continue
+        if used is None:
+            used = _referenced_files()
+        filepath = os.path.join(os.path.normcase(os.path.normpath(directory)),
+                                os.path.normcase(filename))
+        if filepath not in used:
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+
+
+def strip_files_exist(strip):
+    directory = bpy.path.abspath(strip.directory)
+    return all(os.path.exists(os.path.join(directory, element.filename))
+               for element in strip.elements)
 
 
 def needs_relocate(scene):
@@ -354,6 +477,65 @@ class VSE_SHAPES_OT_relocate(bpy.types.Operator):
                 regenerate_strip(scene, strip)
                 count += 1
         self.report({'INFO'}, "Moved %d shape image(s)" % count)
+        return {'FINISHED'}
+
+
+def _active_shape(context):
+    se = context.scene.sequence_editor if context.scene else None
+    strip = se.active_strip if se is not None else None
+    sh = getattr(strip, "vse_shape", None)
+    return strip if sh is not None and sh.is_shape else None
+
+
+class VSE_SHAPES_OT_keyframe(bpy.types.Operator):
+    bl_idname = "vse_shapes.keyframe"
+    bl_label = "Keyframe Shape Property"
+    bl_description = ("Insert a keyframe for this property at the current frame "
+                      "(deletes it if the frame is already keyed)")
+    bl_options = {'REGISTER', 'UNDO', 'INTERNAL'}
+
+    prop: StringProperty(options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return _active_shape(context) is not None
+
+    def execute(self, context):
+        if self.prop not in anim.ANIMATABLE:
+            return {'CANCELLED'}
+        scene = context.scene
+        strip = _active_shape(context)
+        path = anim.prop_path(strip, self.prop)
+        frame = scene.frame_current
+        fcs = anim.shape_fcurves(scene, strip).get(self.prop)
+        if fcs and anim.has_key_at(fcs, frame):
+            scene.keyframe_delete(path, frame=frame)
+            # Drop curves left without keys so the shape can become static again.
+            fcurves = anim.scene_fcurves(scene)
+            for fc in fcs:
+                if len(fc.keyframe_points) == 0:
+                    fcurves.remove(fc)
+        else:
+            scene.keyframe_insert(path, frame=frame, group=strip.name)
+        regenerate_strip(scene, strip)
+        return {'FINISHED'}
+
+
+class VSE_SHAPES_OT_clear_animation(bpy.types.Operator):
+    bl_idname = "vse_shapes.clear_animation"
+    bl_label = "Clear Shape Animation"
+    bl_description = "Remove all keyframes of the active shape's style properties"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        strip = _active_shape(context)
+        return strip is not None and bool(anim.shape_fcurves(context.scene, strip))
+
+    def execute(self, context):
+        strip = _active_shape(context)
+        anim.clear_animation(context.scene, strip)
+        regenerate_strip(context.scene, strip)
         return {'FINISHED'}
 
 
@@ -913,6 +1095,8 @@ _classes = (
     VSE_SHAPES_OT_add_menu,
     VSE_SHAPES_OT_add,
     VSE_SHAPES_OT_relocate,
+    VSE_SHAPES_OT_keyframe,
+    VSE_SHAPES_OT_clear_animation,
     VSE_SHAPES_OT_draw,
     VSE_SHAPES_OT_draw_stroke,
 )

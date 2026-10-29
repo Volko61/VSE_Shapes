@@ -70,8 +70,12 @@ def _shape_update(self, context):
     if scene is None:
         return
     strip = find_owner_strip(self, scene)
-    if strip is not None:
-        from . import ops
+    if strip is None:
+        return
+    from . import anim, ops
+    if anim.shape_fcurves(scene, strip):
+        anim.schedule()  # baking an image sequence is too slow for slider drags
+    else:
         ops.regenerate_strip(scene, strip)
 
 
@@ -88,9 +92,12 @@ class VSEShapeSettings(bpy.types.PropertyGroup):
     uid: StringProperty(default="", options={'HIDDEN'})
     # Freehand stroke points as JSON [[x, y], ...] relative to the image center.
     points: StringProperty(default="", options={'HIDDEN'})
+    # Hash of the last animation bake; empty while the shape is not animated.
+    anim_sig: StringProperty(default="", options={'HIDDEN'})
 
     shape_type: EnumProperty(
-        name="Shape", items=_SHAPE_ITEMS, default='RECT', update=_shape_update)
+        name="Shape", items=_SHAPE_ITEMS, default='RECT', options=set(),
+        update=_shape_update)
     width: IntProperty(
         name="Width", default=400, min=2, soft_max=8192, subtype='PIXEL',
         update=_shape_update)

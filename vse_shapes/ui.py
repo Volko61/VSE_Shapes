@@ -3,7 +3,7 @@ and Add-menu entries."""
 
 import bpy
 
-from . import ops
+from . import anim, ops
 
 # Blender 5.0 moved strip properties into the Properties editor.
 _IN_PROPERTIES = bpy.app.version >= (5, 0, 0)
@@ -117,6 +117,28 @@ class VSE_SHAPES_PT_defaults(_PanelBase, bpy.types.Panel):
         layout.prop(tool, "duration")
 
 
+def _keyed_prop(layout, context, strip, fcurves, name, text=None, heading=""):
+    """A shape property followed by a keyframe toggle (Blender's own
+    decorators can't resolve the property's animation path)."""
+    row = layout.row(align=True, heading=heading)
+    if text is None:
+        row.prop(strip.vse_shape, name)
+    else:
+        row.prop(strip.vse_shape, name, text=text)
+    fcs = fcurves.get(name)
+    if fcs is None:
+        icon = 'DECORATE'
+    elif anim.has_key_at(fcs, context.scene.frame_current):
+        icon = 'DECORATE_KEYFRAME'
+    else:
+        icon = 'DECORATE_ANIMATE'
+    if isinstance(getattr(strip.vse_shape, name), bool):
+        # Checkboxes don't fill the row; keep the toggle in the decorator column.
+        row = row.row()
+        row.alignment = 'RIGHT'
+    row.operator("vse_shapes.keyframe", text="", icon=icon, emboss=False).prop = name
+
+
 class VSE_SHAPES_PT_active(_PanelBase, bpy.types.Panel):
     bl_label = "Active Shape"
 
@@ -130,12 +152,16 @@ class VSE_SHAPES_PT_active(_PanelBase, bpy.types.Panel):
         layout.use_property_decorate = False
         strip = _active_shape_strip(context)
         sh = strip.vse_shape
+        fcurves = anim.shape_fcurves(context.scene, strip)
+
+        def prop(col, name, **kwargs):
+            _keyed_prop(col, context, strip, fcurves, name, **kwargs)
 
         if sh.shape_type == 'FREEHAND':
             col = layout.column()
-            col.prop(sh, "fill_color", text="Color")
-            col.prop(sh, "stroke_width", text="Brush Size")
-            col.prop(sh, "feather")
+            prop(col, "fill_color", text="Color")
+            prop(col, "stroke_width", text="Brush Size")
+            prop(col, "feather")
             col.separator()
             row = col.row(align=True)
             row.operator("vse_shapes.draw_stroke", text="Edit Drawing",
@@ -144,34 +170,42 @@ class VSE_SHAPES_PT_active(_PanelBase, bpy.types.Panel):
                               icon='X')
             op.edit = True
             op.mode = 'ERASE'
+            self._draw_animation(layout, fcurves)
             return
 
         col = layout.column()
         col.prop(sh, "shape_type")
         col.separator()
-        col.prop(sh, "width")
-        col.prop(sh, "height")
+        prop(col, "width")
+        prop(col, "height")
         if sh.shape_type == 'ARROW':
-            col.prop(sh, "arrow_shaft_width")
-            col.prop(sh, "arrow_head_length")
+            prop(col, "arrow_shaft_width")
+            prop(col, "arrow_head_length")
 
-        col = layout.column(heading="Fill")
-        col.prop(sh, "fill", text="")
+        col = layout.column()
+        prop(col, "fill", text="", heading="Fill")
         sub = col.column()
         sub.active = sh.fill
-        sub.prop(sh, "fill_color", text="Color")
+        prop(sub, "fill_color", text="Color")
 
-        col = layout.column(heading="Stroke")
-        col.prop(sh, "stroke", text="")
+        col = layout.column()
+        prop(col, "stroke", text="", heading="Stroke")
         sub = col.column()
         sub.active = sh.stroke
-        sub.prop(sh, "stroke_color", text="Color")
-        sub.prop(sh, "stroke_width", text="Width")
+        prop(sub, "stroke_color", text="Color")
+        prop(sub, "stroke_width", text="Width")
 
         col = layout.column()
         if sh.shape_type == 'RECT':
-            col.prop(sh, "corner_radius")
-        col.prop(sh, "feather")
+            prop(col, "corner_radius")
+        prop(col, "feather")
+        self._draw_animation(layout, fcurves)
+
+    @staticmethod
+    def _draw_animation(layout, fcurves):
+        if fcurves:
+            layout.separator()
+            layout.operator("vse_shapes.clear_animation", icon='X')
 
 
 class VSE_SHAPES_MT_add(bpy.types.Menu):
